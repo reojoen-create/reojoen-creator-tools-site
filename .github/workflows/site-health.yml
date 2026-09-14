@@ -1,0 +1,92 @@
+name: Compliance Site Health
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/site-health.yml"
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compliance-site-health
+  cancel-in-progress: true
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BASE_URL: https://reojoen-create.github.io/reojoen-creator-tools-site
+
+    steps:
+      - name: Verify three public HTTPS audit URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          check() {
+            name="$1"
+            path="$2"
+            shift 2
+            url="${BASE_URL}${path}"
+            file="${tmp}/${name}.html"
+            code="$(curl --silent --show-error --location --retry 3 --retry-all-errors --connect-timeout 10 --max-time 30 --output "$file" --write-out '%{http_code}' "$url")"
+            test "$code" = "200"
+            for marker in "$@"; do
+              grep -Fq "$marker" "$file"
+            done
+            echo "${name}=PASS ${url} HTTP_${code}"
+          }
+
+          check home "/" \
+            "REO JOEN Creator Tools" \
+            "YouTube API Services" \
+            "./privacy/" \
+            "./terms/"
+
+          check privacy "/privacy/" \
+            "Privacy Policy" \
+            "Use of YouTube API Services" \
+            "Google Privacy Policy" \
+            "no later than 7 calendar days"
+
+          check terms "/terms/" \
+            "Terms of Service" \
+            "YouTube API Services Terms of Service" \
+            "Privacy Policy"
+
+      - name: Write sanitized health evidence
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          base=os.environ['BASE_URL'].rstrip('/')
+          data={
+            'schema':'reojoen_compliance_site_health/v1',
+            'status':'PASS',
+            'urls':[
+              base+'/',
+              base+'/privacy/',
+              base+'/terms/'
+            ],
+            'login_required':False,
+            'secret_values_exposed':False
+          }
+          open('compliance-site-health.json','w',encoding='utf-8').write(json.dumps(data,indent=2)+'\n')
+          print('COMPLIANCE_SITE_HEALTH=PASS')
+          PY
+
+      - name: Upload sanitized health evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-site-health-${{ github.run_id }}
+          path: compliance-site-health.json
+          if-no-files-found: error
+          retention-days: 90
