@@ -5,9 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import tempfile
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 USES_RE = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.MULTILINE)
@@ -34,6 +33,8 @@ EXPECTED_PERMISSIONS = {
         "contents": "read",
     },
 }
+
+GUARD_PATH = ".github/workflows/audit-site-security-guard.yml"
 
 
 def _top_level_mapping(text: str, key: str) -> Dict[str, str]:
@@ -112,6 +113,29 @@ def validate_workflow(path: str, text: str) -> None:
             raise AssertionError(f"FORBIDDEN_TRIGGER_PRESENT:{path}:{marker}")
 
 
+def validate_guard_workflow(root: Path) -> None:
+    path = root / GUARD_PATH
+    if not path.is_file():
+        raise AssertionError("SECURITY_GUARD_WORKFLOW_MISSING")
+    text = path.read_text(encoding="utf-8")
+    _extract_uses(text)  # every external action in the guard must also be a 40-char SHA
+    permissions = _top_level_mapping(text, "permissions")
+    if permissions != {"contents": "read"}:
+        raise AssertionError(f"SECURITY_GUARD_PERMISSIONS_MISMATCH:{permissions}")
+    for marker in [
+        "pull_request:",
+        'cron: "37 */6 * * *"',
+        "cancel-in-progress: true",
+        "timeout-minutes: 5",
+        "Run fail-closed mutation self-tests",
+        "Validate deployed workflow security invariants",
+    ]:
+        if marker not in text:
+            raise AssertionError(f"SECURITY_GUARD_REQUIRED_MARKER_MISSING:{marker}")
+    if "pull_request_target:" in text:
+        raise AssertionError("SECURITY_GUARD_FORBIDDEN_PULL_REQUEST_TARGET")
+
+
 def validate_repo(root: Path) -> dict:
     checked = []
     for rel in EXPECTED_PINS:
@@ -121,11 +145,26 @@ def validate_repo(root: Path) -> dict:
         text = path.read_text(encoding="utf-8")
         validate_workflow(rel, text)
         checked.append(rel)
+
+    validate_guard_workflow(root)
+
+    workflow_dir = root / ".github" / "workflows"
+    all_workflows = []
+    all_external_actions = 0
+    for path in sorted(workflow_dir.glob("*.y*ml")):
+        rel = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        refs = _extract_uses(text)  # global floating-tag regression detector
+        all_external_actions += len(refs)
+        all_workflows.append(rel)
+
     return {
-        "schema": "reojoen_audit_site_workflow_security/v1",
+        "schema": "reojoen_audit_site_workflow_security/v2",
         "status": "PASS",
-        "checked_workflows": checked,
-        "immutable_action_count": sum(len(v) for v in EXPECTED_PINS.values()),
+        "critical_workflows": checked,
+        "all_workflows_scanned": all_workflows,
+        "external_actions_scanned": all_external_actions,
+        "critical_expected_action_count": sum(len(v) for v in EXPECTED_PINS.values()),
         "secret_values_exposed": False,
     }
 
@@ -178,8 +217,22 @@ def self_test(root: Path) -> dict:
         "REQUIRED_MARKER_MISSING",
     )
 
+    guard_text = (root / GUARD_PATH).read_text(encoding="utf-8")
+    try:
+        _extract_uses(guard_text.replace(
+            "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+            "actions/checkout@v6",
+            1,
+        ))
+    except AssertionError as exc:
+        if "ACTION_REF_NOT_IMMUTABLE_SHA" not in str(exc):
+            raise
+        cases.append({"case": "guard_self_pin_drift", "status": "PASS"})
+    else:
+        raise AssertionError("SELF_TEST_DID_NOT_FAIL:guard_self_pin_drift")
+
     return {
-        "schema": "reojoen_audit_site_workflow_security_selftest/v1",
+        "schema": "reojoen_audit_site_workflow_security_selftest/v2",
         "status": "PASS",
         "cases": cases,
         "secret_values_exposed": False,
