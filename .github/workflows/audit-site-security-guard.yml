@@ -1,0 +1,55 @@
+name: Audit Site Workflow Security Guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'ops/audit_site_workflow_security_guard.py'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'ops/audit_site_workflow_security_guard.py'
+  schedule:
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-site-workflow-security
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Run fail-closed mutation self-tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ops/audit_site_workflow_security_guard.py \
+            --self-test \
+            --output audit-site-workflow-security-selftest.json
+
+      - name: Validate deployed workflow security invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ops/audit_site_workflow_security_guard.py \
+            --output audit-site-workflow-security.json
+
+      - name: Upload sanitized security evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: audit-site-workflow-security-${{ github.run_id }}
+          path: |
+            audit-site-workflow-security.json
+            audit-site-workflow-security-selftest.json
+          if-no-files-found: error
+          retention-days: 90
